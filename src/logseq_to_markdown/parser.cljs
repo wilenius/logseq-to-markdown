@@ -94,11 +94,32 @@
          ;; Merge page property tags with the tags collected from the blocks,
          ;; removing duplicates
          merged-tags (seq (distinct (concat (property-tags properties) inline-tags)))
-         created-at (utils/->hugo-date (get page :block/created-at) (config/entry :time-pattern))
-         updated-at (utils/->hugo-date (get page :block/updated-at) (config/entry :time-pattern))
+         ;; Prefer explicit page-property overrides (useful when Logseq's DB
+         ;; timestamps get bumped, e.g. after a graph re-index). Accept both
+         ;; the Hugo-style names (`date::`, `lastMod::`) and the Logseq-idiomatic
+         ;; ones (`created::`, `last-edited::`). Fall back to the DB timestamps.
+         ;; A value written as a page ref (`date:: [[2026-08-05]]`) arrives as
+         ;; a single-element collection; unwrap it before stringifying. Drop
+         ;; any time component (`2026-04-22T07:15` → `2026-04-22`) so Hugo's
+         ;; strict date parser accepts the result.
+         coerce-date (fn [v]
+                       (let [x (if (and (coll? v) (not (string? v))) (first v) v)
+                             s (some-> x str s/trim not-empty)]
+                         (some-> s (s/replace #"T.*$" ""))))
+         ;; Logseq lowercases property keys before storing, so `lastMod::`
+         ;; arrives as `:lastmod`. Check that too.
+         property-date (or (coerce-date (get properties :date))
+                           (coerce-date (get properties :created)))
+         property-lastmod (or (coerce-date (get properties :lastMod))
+                              (coerce-date (get properties :lastmod))
+                              (coerce-date (get properties :last-edited)))
+         created-at (or property-date
+                        (utils/->hugo-date (get page :block/created-at) (config/entry :time-pattern)))
+         updated-at (or property-lastmod
+                        (utils/->hugo-date (get page :block/updated-at) (config/entry :time-pattern)))
          ;; Pass through any other page properties as YAML frontmatter lines.
          ;; Skip the ones we've already rendered above so we don't double-emit.
-         extra-props (apply dissoc properties [:tags :categories :title :namespace :date :lastMod])
+         extra-props (apply dissoc properties [:tags :categories :title :namespace :date :lastMod :lastmod :created :last-edited])
          extra-lines (s/join "" (for [[k v] extra-props]
                                   (str (name k) ": " (parse-property-yaml v) "\n")))
          page-data (s/join ""

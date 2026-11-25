@@ -119,7 +119,11 @@
                         (utils/->hugo-date (get page :block/updated-at) (config/entry :time-pattern)))
          ;; Pass through any other page properties as YAML frontmatter lines.
          ;; Skip the ones we've already rendered above so we don't double-emit.
-         extra-props (apply dissoc properties [:tags :categories :title :namespace :date :lastMod :lastmod :created :last-edited])
+         ;; Compare lowercased names: Logseq lowercases property keys, so a
+         ;; dissoc of :lastMod matches nothing and lets a second, unparseable
+         ;; `lastmod: #{...}` key through.
+         rendered-props #{"tags" "categories" "title" "namespace" "date" "lastmod" "created" "last-edited"}
+         extra-props (remove #(contains? rendered-props (s/lower-case (name (key %)))) properties)
          extra-lines (s/join "" (for [[k v] extra-props]
                                   (str (name k) ": " (parse-property-yaml v) "\n")))
          page-data (s/join ""

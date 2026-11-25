@@ -150,23 +150,6 @@
       :namespace namespace
       :data page-data})))
 
-(defn parse-block-refs
-  [text]
-  (let [pattern #"\(\(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)\)"
-        block-ref-text (re-find pattern text)
-        alias-pattern #"\[([^\[]*?)\]\([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\)"
-        alias-text (re-find alias-pattern text)]
-    (if (empty? block-ref-text)
-      (if (empty? alias-text)
-        text
-        (str (last alias-text)))
-      (let [block-ref-id (last block-ref-text)
-            data (graph/get-ref-block block-ref-id)]
-        (if (seq data)
-          (let [id-pattern (re-pattern (str "id:: " block-ref-id))]
-            (s/replace data id-pattern ""))
-          text)))))
-
 (defn parse-image
   [text]
   (let [pattern #"!\[.*?\]\((.*?)\)"
@@ -469,6 +452,44 @@
         {:text text
          :lossless? (and (not truncated?)
                          (= text (normalize-spacing plain)))}))))
+
+(def ^:private uuid-pattern
+  "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+(def ^:private block-ref-pattern
+  (re-pattern (str "\\(\\((" uuid-pattern ")\\)\\)")))
+
+(def ^:private aliased-block-ref-pattern
+  "Logseq writes an aliased block reference as [label](((uuid))), and older
+   graphs as [label](uuid)."
+  (re-pattern (str "\\[([^\\[\\]]*?)\\]\\(\\(?\\(?(" uuid-pattern ")\\)?\\)?\\)")))
+
+(defn- block-ref->markdown
+  "What a block reference becomes in the exported markdown. Logseq shows the
+   referenced block's own text in place of the reference, so that is the
+   text used here; when the referenced block is public it also gets a link
+   to the page it was exported to. `label` overrides the derived text, for
+   the aliased form. Returns nil when the reference should be left alone."
+  [block-ref-id label]
+  (let [{:keys [content page-name public?]} (graph/get-ref-block block-ref-id)
+        text (or label (:text (derive-title content)))]
+    (when-not (s/blank? text)
+      (if (and page-name (or public? (config/entry :export-all)))
+        (str "[" text "]({{< ref \"/pages/" (fs/->filename page-name) "\" >}})")
+        text))))
+
+(defn parse-block-refs
+  "Replace every block reference in `text` in place. A reference to a block
+   that is not exported leaves only its text behind, because there is no
+   published page to point at — the same thing Logseq itself shows."
+  [text]
+  (-> text
+      (s/replace aliased-block-ref-pattern
+                 (fn [[match label block-ref-id]]
+                   (or (block-ref->markdown block-ref-id label) match)))
+      (s/replace block-ref-pattern
+                 (fn [[match block-ref-id]]
+                   (or (block-ref->markdown block-ref-id nil) match)))))
 
 (defn apply-bullet-prefix
   "Prepend `prefix` (e.g. \"\\t+ \") to the first line and a matching

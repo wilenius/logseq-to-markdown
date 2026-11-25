@@ -62,19 +62,49 @@
         query-res (d/q query (get-graph-db) link)]
     (not-empty query-res)))
 
+(defn- public-property?
+  [properties]
+  (= true (get properties :public)))
+
+(defn- exported-block?
+  "Does this block reach the export? It does when it carries public:: true
+   itself, when an ancestor does — the public-blocks pass keeps a public
+   block's whole subtree — or when it sits on a public page, which is
+   exported whole. Logseq makes the page entity the :block/parent of a
+   top-level block, so walking up the parent chain covers all three."
+  [db-id]
+  (loop [id db-id
+         ;; the chain is a few levels deep at most; the bound is only there
+         ;; so a cyclic :block/parent can't hang the export
+         hops 0]
+    (if (or (nil? id) (> hops 50))
+      false
+      (let [block (d/pull (get-graph-db)
+                          [:block/properties {:block/parent [:db/id]}]
+                          id)]
+        (if (public-property? (get block :block/properties))
+          true
+          (recur (get-in block [:block/parent :db/id]) (inc hops)))))))
+
 (defn get-ref-block
+  "What a ((uuid)) reference points at: the raw content of the block, the
+   name of the page it lives on (which is the page it is exported to) and
+   whether it is public. Returns nil when no block carries that id."
   [block-ref-id]
-  (let [query '[:find ?c
+  (let [query '[:find ?b ?c ?n
                 :in $ ?block-ref-id
                 :where
-                [?p :block/properties ?pr]
+                [?b :block/properties ?pr]
                 [(get ?pr :id) ?t]
                 [(= ?block-ref-id ?t)]
-                [?p :block/content ?c]]
+                [?b :block/content ?c]
+                [?b :block/page ?p]
+                [?p :block/original-name ?n]]
         query-res (d/q query (get-graph-db) block-ref-id)]
-    (if (> (count query-res) 0)
-      (nth (map #(get % 0) query-res) 0)
-      ())))
+    (when-let [[db-id content page-name] (first query-res)]
+      {:content content
+       :page-name page-name
+       :public? (exported-block? db-id)})))
 
 (defn get-namespace-pages
   [namespace]

@@ -69,6 +69,49 @@
     (sequential? value) (parse-property-value-list value)
     :else (str value)))
 
+(defn- iso-date->timestamp
+  [iso-date]
+  (.getTime (js/Date. (str iso-date "T00:00:00Z"))))
+
+(defn- property-iso-date
+  "The first ISO date (yyyy-MM-dd) held by any of `key-names` among the page
+   properties, compared lowercased because Logseq lowercases property keys.
+   A page-ref value (`date:: [[2026-11-07]]`) arrives as a set; a time part
+   (`2026-04-22T07:15`) is dropped. Anything that is not an ISO date is
+   ignored, so the caller falls back to the database timestamp."
+  [properties key-names]
+  (let [wanted (set key-names)]
+    (some (fn [[k v]]
+            (when (contains? wanted (s/lower-case (name k)))
+              (re-find #"\d{4}-\d{2}-\d{2}" (if (coll? v) (s/join " " v) (str v)))))
+          properties)))
+
+(defn- publication-date
+  "The page's `date:` front matter. A `date::` (or `created::`) page property
+   wins — it is the author saying when the page was published, which can be
+   long after Logseq created it, and it survives a graph re-index, which
+   resets the database timestamps — then a journal's own day, then Logseq's
+   created-at."
+  [page properties pattern]
+  (let [prop-iso (property-iso-date properties ["date" "created"])
+        journal-day (get page :block/journal-day)
+        journal-iso (when journal-day
+                      (let [d (str journal-day)]
+                        (str (subs d 0 4) "-" (subs d 4 6) "-" (subs d 6 8))))]
+    (cond
+      prop-iso (utils/->hugo-date (iso-date->timestamp prop-iso) pattern)
+      journal-iso (utils/->hugo-date (iso-date->timestamp journal-iso) pattern)
+      :else (utils/->hugo-date (get page :block/created-at) pattern))))
+
+(defn- modification-date
+  "The page's `lastMod:` front matter. A `lastMod::` (or `last-edited::`)
+   page property pins it — useful when a graph re-index has reset the
+   database timestamps — otherwise Logseq's updated-at."
+  [page properties pattern]
+  (if-let [prop-iso (property-iso-date properties ["lastmod" "last-edited"])]
+    (utils/->hugo-date (iso-date->timestamp prop-iso) pattern)
+    (utils/->hugo-date (get page :block/updated-at) pattern)))
+
 (defn parse-meta-data
   ([page]
    (parse-meta-data page [] nil))
@@ -94,29 +137,8 @@
          ;; Merge page property tags with the tags collected from the blocks,
          ;; removing duplicates
          merged-tags (seq (distinct (concat (property-tags properties) inline-tags)))
-         ;; Prefer explicit page-property overrides (useful when Logseq's DB
-         ;; timestamps get bumped, e.g. after a graph re-index). Accept both
-         ;; the Hugo-style names (`date::`, `lastMod::`) and the Logseq-idiomatic
-         ;; ones (`created::`, `last-edited::`). Fall back to the DB timestamps.
-         ;; A value written as a page ref (`date:: [[2026-08-05]]`) arrives as
-         ;; a single-element collection; unwrap it before stringifying. Drop
-         ;; any time component (`2026-04-22T07:15` → `2026-04-22`) so Hugo's
-         ;; strict date parser accepts the result.
-         coerce-date (fn [v]
-                       (let [x (if (and (coll? v) (not (string? v))) (first v) v)
-                             s (some-> x str s/trim not-empty)]
-                         (some-> s (s/replace #"T.*$" ""))))
-         ;; Logseq lowercases property keys before storing, so `lastMod::`
-         ;; arrives as `:lastmod`. Check that too.
-         property-date (or (coerce-date (get properties :date))
-                           (coerce-date (get properties :created)))
-         property-lastmod (or (coerce-date (get properties :lastMod))
-                              (coerce-date (get properties :lastmod))
-                              (coerce-date (get properties :last-edited)))
-         created-at (or property-date
-                        (utils/->hugo-date (get page :block/created-at) (config/entry :time-pattern)))
-         updated-at (or property-lastmod
-                        (utils/->hugo-date (get page :block/updated-at) (config/entry :time-pattern)))
+         published-at (publication-date page properties (config/entry :time-pattern))
+         updated-at (modification-date page properties (config/entry :time-pattern))
          ;; Pass through any other page properties as YAML frontmatter lines.
          ;; Skip the ones we've already rendered above so we don't double-emit.
          ;; Compare lowercased names: Logseq lowercases property keys, so a
@@ -132,7 +154,7 @@
                             (when namespace? (str "namespace: " namespace "\n"))
                             (str "tags: " (parse-property-value-list merged-tags) "\n")
                             (str "categories: " (parse-property-value-list categories) "\n")
-                            (str "date: " created-at "\n")
+                            (str "date: " published-at "\n")
                             (str "lastMod: " updated-at "\n")
                             extra-lines
                             "---\n"])]
@@ -148,7 +170,7 @@
        (println (str "Inline Tags: " inline-tags))
        (println (str "Merged Tags: " merged-tags))
        (println (str "Categories: " categories))
-       (println (str "Created at: " created-at))
+       (println (str "Published at: " published-at))
        (println (str "Updated at: " updated-at)))
      {:filename file
       :namespace namespace
